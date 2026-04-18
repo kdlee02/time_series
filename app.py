@@ -541,6 +541,17 @@ with st.sidebar:
     uploaded = st.file_uploader("Upload CSV", type=['csv'], label_visibility='collapsed')
 
     if uploaded:
+        # ── 파일 변경 감지 → state 초기화 ──────────────────────────
+        file_id = uploaded.file_id
+        if st.session_state.get('_file_id') != file_id:
+            for k in ['raw','imputed','outlier_cleaned','denoised',
+                    'outlier_indices','residuals','decomp',
+                    'pipeline_done','holt_results','hw_results',
+                    'stl_results','forecast_result']:
+                st.session_state[k] = None
+            st.session_state['pipeline_done'] = False
+            st.session_state['_file_id'] = file_id
+        
         preview_df = pd.read_csv(io.BytesIO(uploaded.getvalue()))
         cols = preview_df.columns.tolist()
 
@@ -554,7 +565,8 @@ with st.sidebar:
         ma_window = 6
         if impute_method == 'Moving Average':
             ma_window = st.slider("MA window", 2, 24, 6)
-        decomp_sp     = st.slider("Seasonality period (sp)", 2, 52, 12)
+        decomp_sp = st.slider("Seasonality period (sp)", 2, 365, 12)
+
         decomp_degree = st.slider("Trend poly degree", 1, 3, 2)
 
         st.markdown('<div class="section-header">03 · Outlier Detection</div>', unsafe_allow_html=True)
@@ -1080,7 +1092,8 @@ def compute_metrics(y_true, y_pred):
 
 def run_holt(series, trend, smoothing_level, smoothing_trend):
     s = prep_series_for_sktime(series)
-    y_train, y_test = temporal_train_test_split(s, test_size=36)
+    test_size = max(2, int(len(s) * 0.3))
+    y_train, y_test = temporal_train_test_split(s, test_size=test_size)
     model = ExponentialSmoothing(
         trend=trend,
         seasonal=None,
@@ -1098,7 +1111,9 @@ def run_holt(series, trend, smoothing_level, smoothing_trend):
 
 def run_hw(series, trend, seasonal, smoothing_level, smoothing_trend, smoothing_seasonal, sp):
     s = prep_series_for_sktime(series)
-    y_train, y_test = temporal_train_test_split(s, test_size=36)
+    test_size = max(2, int(len(s) * 0.3))
+    y_train, y_test = temporal_train_test_split(s, test_size=test_size)
+
     model = ExponentialSmoothing(
         trend=trend,
         seasonal=seasonal,
@@ -1118,7 +1133,8 @@ def run_hw(series, trend, seasonal, smoothing_level, smoothing_trend, smoothing_
 
 def run_stl(series, sp):
     s = prep_series_for_sktime(series)
-    y_train, y_test = temporal_train_test_split(s, test_size=36)
+    test_size = max(2, int(len(s) * 0.3))
+    y_train, y_test = temporal_train_test_split(s, test_size=test_size)
     model = STLForecaster(sp=sp)
     model.fit(y_train)
     fh = list(range(1, len(y_test) + 1))
@@ -1163,7 +1179,7 @@ with tab6:
 
     series_for_fc = prep_series_for_sktime(st.session_state['denoised'])
 
-    st.markdown('<div class="section-header">Model Configuration & Evaluation (test_size = 36)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Model Configuration & Evaluation</div>', unsafe_allow_html=True)
 
     # ── Holt ──────────────────────────────────────────────────────
     with st.expander("📘 Holt — Double Exponential Smoothing", expanded=True):
@@ -1203,7 +1219,9 @@ with tab6:
 
     # ── STL ────────────────────────────────────────────────────────
     with st.expander("📙 STL Forecaster", expanded=True):
-        stl_sp = st.slider("Seasonal period (sp)", 2, 52, 12, key='stl_sp')
+
+        stl_sp = st.slider("Seasonal period (sp)", 2, 365, 12, key='stl_sp')
+
         if st.button("▶  Run STL", key='run_stl'):
             with st.spinner("Fitting STL…"):
                 try:
@@ -1290,8 +1308,15 @@ with tab7:
     with fc1:
         selected_model = st.selectbox("Select model", list(available_fc.keys()))
     with fc2:
-        horizon = st.slider("Forecast horizon (months)", 1, 120, 12)
-
+        freq = detect_freq(st.session_state['raw'])
+        freq_label_map = {
+            'D': '일(days)', 'W': '주(weeks)',
+            'ME': '월(months)', 'M': '월(months)',
+            'QE': '분기(quarters)', 'YE': '년(years)'
+        }
+        freq_label = freq_label_map.get(freq, 'steps')
+        horizon = st.slider(f"Forecast horizon ({freq_label})", 1, 120, 12)
+    
     if st.button("▶  Generate Forecast", use_container_width=True):
         with st.spinner("Forecasting…"):
             try:
@@ -1320,9 +1345,10 @@ with tab7:
         color = model_colors.get(fc_res['model_name'], '#00d4ff')
 
         fig = go.Figure()
-        series_plot   = to_plot_index(fc_res['series'])
+
         forecast_plot = to_plot_index(fc_res['forecast'])
-        raw_plot = fc_res['raw']                # already DatetimeIndex, no conversion needed
+        raw_plot = fc_res['raw']
+    
         fig.add_trace(go.Scatter(
             x=raw_plot.index, y=raw_plot,
             name='Original', line=dict(color='#94a3b8', width=1.5),
@@ -1333,7 +1359,8 @@ with tab7:
             line=dict(color=color, width=2.5, dash='dot'),
         ))
         # vertical line at forecast start
-        split_x = series_plot.index[-1]
+        split_x = raw_plot.index[-1]
+        
         fig.add_vline(x=split_x, line_color='#334155', line_dash='dash', line_width=1)
         fig.update_layout(**PLOT_LAYOUT,
             title=dict(
