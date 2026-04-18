@@ -599,7 +599,7 @@ with st.sidebar:
                             s_freq.index = pd.DatetimeIndex(s_freq.index, freq=inferred)
                     deseason_t = Deseasonalizer(sp=decomp_sp, model="multiplicative")
                     y_deseas   = deseason_t.fit_transform(s_freq)
-                    y_seasonal = s_freq - y_deseas
+                    y_seasonal = s_freq / y_deseas
                     detrend_t  = Detrender(forecaster=PolynomialTrendForecaster(degree=decomp_degree))
                     y_detrended = detrend_t.fit_transform(y_deseas)
                     y_trend    = y_deseas - y_detrended
