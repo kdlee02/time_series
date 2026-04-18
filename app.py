@@ -258,6 +258,17 @@ def detect_freq(series):
     if 364 <= days <= 366: return 'YE'
     return None
 
+def months_to_steps(months, freq):
+    """월 단위 시평 → 데이터 주파수에 맞는 스텝 수 변환"""
+    mapping = {
+        'D':  30,
+        'W':  4,
+        'ME': 1, 'M': 1,
+        'QE': 0.33, 'Q': 0.33,
+        'YE': 0.083, 'Y': 0.083,
+    }
+    multiplier = mapping.get(freq, 1)
+    return max(1, round(months * multiplier))
 
 def basic_stats(series):
     s = series.dropna()
@@ -1309,13 +1320,9 @@ with tab7:
         selected_model = st.selectbox("Select model", list(available_fc.keys()))
     with fc2:
         freq = detect_freq(st.session_state['raw'])
-        freq_label_map = {
-            'D': '일(days)', 'W': '주(weeks)',
-            'ME': '월(months)', 'M': '월(months)',
-            'QE': '분기(quarters)', 'YE': '년(years)'
-        }
-        freq_label = freq_label_map.get(freq, 'steps')
-        horizon = st.slider(f"Forecast horizon ({freq_label})", 1, 120, 12)
+        horizon = st.slider("Forecast horizon (월 기준)", 1, 120, 12)
+        horizon_steps = months_to_steps(horizon, freq)
+        st.caption(f"→ 주파수: `{freq}` | 실제 예측 스텝: `{horizon_steps}`")
     
     if st.button("▶  Generate Forecast", use_container_width=True):
         with st.spinner("Forecasting…"):
@@ -1326,7 +1333,7 @@ with tab7:
                 # Re-fit on full series using same params stored in the fitted model
                 full_model = res['model'].clone()
                 full_model.fit(series_full)
-                fh = list(range(1, horizon + 1))
+                fh = list(range(1, horizon_steps + 1))
                 y_future = full_model.predict(fh=fh)
                 st.session_state['forecast_result'] = {
                     'model_name': selected_model,
