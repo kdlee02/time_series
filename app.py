@@ -315,7 +315,8 @@ def hampel_filter(series, window=5, n_sigma=3, sp=12, poly_degree=2):
         if freq:
             s_freq.index = pd.DatetimeIndex(s_freq.index, freq=freq)
     try:
-        deseason = Deseasonalizer(sp=sp, model="multiplicative")
+        decomp_model = "multiplicative" if s_freq.min() > 0 else "additive"
+        deseason = Deseasonalizer(sp=sp, model=decomp_model)
         y_deseas = deseason.fit_transform(s_freq)
         detrend  = Detrender(forecaster=PolynomialTrendForecaster(degree=poly_degree))
         resid    = detrend.fit_transform(y_deseas)
@@ -361,7 +362,8 @@ def residual_outliers(series, sp=12, poly_degree=2, max_outliers=10, alpha=0.05)
         if freq:
             s_freq.index = pd.DatetimeIndex(s_freq.index, freq=freq)
     try:
-        deseason = Deseasonalizer(sp=sp, model="multiplicative")
+        decomp_model = "multiplicative" if s_freq.min() > 0 else "additive"
+        deseason = Deseasonalizer(sp=sp, model=decomp_model)
         y_deseas = deseason.fit_transform(s_freq)
         detrend = Detrender(forecaster=PolynomialTrendForecaster(degree=poly_degree))
         resid = detrend.fit_transform(y_deseas)
@@ -577,6 +579,7 @@ with st.sidebar:
         if impute_method == 'Moving Average':
             ma_window = st.slider("MA window", 2, 24, 6)
         decomp_sp = st.slider("Seasonality period (sp)", 2, 365, 12)
+        st.caption("Daily data → sp=365 | Weekly → sp=52 | Monthly → sp=12")
 
         decomp_degree = st.slider("Trend poly degree", 1, 3, 2)
 
@@ -620,9 +623,11 @@ with st.sidebar:
                         inferred = pd.infer_freq(s_freq.index)
                         if inferred:
                             s_freq.index = pd.DatetimeIndex(s_freq.index, freq=inferred)
-                    deseason_t = Deseasonalizer(sp=decomp_sp, model="multiplicative")
+                    # Use additive model when series has non-positive values
+                    decomp_model = "multiplicative" if s_freq.min() > 0 else "additive"
+                    deseason_t = Deseasonalizer(sp=decomp_sp, model=decomp_model)
                     y_deseas   = deseason_t.fit_transform(s_freq)
-                    y_seasonal = s_freq / y_deseas
+                    y_seasonal = s_freq - y_deseas if decomp_model == "additive" else s_freq / y_deseas
                     detrend_t  = Detrender(forecaster=PolynomialTrendForecaster(degree=decomp_degree))
                     y_detrended = detrend_t.fit_transform(y_deseas)
                     y_trend    = y_deseas - y_detrended
@@ -631,6 +636,7 @@ with st.sidebar:
                         'seasonal':       y_seasonal,
                         'trend':          y_trend,
                         'residuals':      y_detrended,
+                        'model':          decomp_model,
                     }
                 except Exception:
                     pass
@@ -1122,15 +1128,30 @@ def run_holt(series, trend, smoothing_level, smoothing_trend):
 
 def run_hw(series, trend, seasonal, smoothing_level, smoothing_trend, smoothing_seasonal, sp):
     s = prep_series_for_sktime(series)
+
+    # Multiplicative seasonality requires strictly positive values.
+    # If the series contains zeros or negatives, force additive.
+    if seasonal == 'mul' and s.min() <= 0:
+        seasonal = 'add'
+        st.warning("⚠️ Series contains non-positive values — switched seasonal='mul' → 'add' automatically.")
+    if trend == 'mul' and s.min() <= 0:
+        trend = 'add'
+        st.warning("⚠️ Series contains non-positive values — switched trend='mul' → 'add' automatically.")
+
     test_size = max(2, int(len(s) * 0.3))
     y_train, y_test = temporal_train_test_split(s, test_size=test_size)
+
+    # Need at least 2 full seasonal cycles in training data for seasonal fitting.
+    if len(y_train) < 2 * sp:
+        st.warning(f"⚠️ Training set ({len(y_train)} pts) has fewer than 2 full seasonal cycles (sp={sp}). "
+                   f"Reduce sp or collect more data for reliable seasonal fitting.")
 
     model = ExponentialSmoothing(
         trend=trend,
         seasonal=seasonal,
         sp=sp,
         smoothing_level=smoothing_level if smoothing_level > 0 else None,
-        smoothing_trend=smoothing_trend if smoothing_trend > 0 else None,
+        smoothing_trend=smoothing_trend if (trend is not None and smoothing_trend > 0) else None,
         smoothing_seasonal=smoothing_seasonal if smoothing_seasonal > 0 else None,
     )
     model.fit(y_train)
@@ -1139,13 +1160,19 @@ def run_hw(series, trend, seasonal, smoothing_level, smoothing_trend, smoothing_
     y_pred.index = y_test.index
     metrics = compute_metrics(y_test, y_pred)
     return {'model': model, 'y_train': y_train, 'y_test': y_test,
-            'y_pred': y_pred, 'metrics': metrics}
+            'y_pred': y_pred, 'metrics': metrics, 'seasonal_used': seasonal, 'trend_used': trend}
 
 
 def run_stl(series, sp):
     s = prep_series_for_sktime(series)
     test_size = max(2, int(len(s) * 0.3))
     y_train, y_test = temporal_train_test_split(s, test_size=test_size)
+
+    # Need at least 2 full seasonal cycles in training data.
+    if len(y_train) < 2 * sp:
+        st.warning(f"⚠️ Training set ({len(y_train)} pts) has fewer than 2 full seasonal cycles (sp={sp}). "
+                   f"Reduce sp or collect more data for reliable seasonal fitting.")
+
     model = STLForecaster(sp=sp)
     model.fit(y_train)
     fh = list(range(1, len(y_test) + 1))
@@ -1213,7 +1240,7 @@ with tab6:
     with st.expander("📗 Holt-Winters — Triple Exponential Smoothing", expanded=True):
         wc1, wc2 = st.columns(2)
         with wc1:
-            hw_trend    = st.selectbox("Trend type",    ['add', 'mul'], key='hw_trend')
+            hw_trend    = st.selectbox("Trend type",    ['None (seasonal only)', 'add', 'mul'], key='hw_trend')
             hw_seasonal = st.selectbox("Seasonal type", ['add', 'mul'], key='hw_seasonal')
         with wc2:
             hw_alpha = st.slider("smoothing_level (α)",   0.0, 1.0, 0.0, step=0.05, key='hw_alpha')
@@ -1222,7 +1249,8 @@ with tab6:
         if st.button("▶  Run Holt-Winters", key='run_hw'):
             with st.spinner("Fitting Holt-Winters…"):
                 try:
-                    res = run_hw(series_for_fc, hw_trend, hw_seasonal, hw_alpha, hw_beta, hw_gamma, decomp_sp)
+                    hw_trend_val = None if hw_trend == 'None (seasonal only)' else hw_trend
+                    res = run_hw(series_for_fc, hw_trend_val, hw_seasonal, hw_alpha, hw_beta, hw_gamma, decomp_sp)
                     st.session_state['hw_results'] = res
                     st.success(f"✓ MAE={res['metrics']['MAE']:.4f}  MSE={res['metrics']['MSE']:.4f}  MAPE={res['metrics']['MAPE (%)']:.2f}%")
                 except Exception as e:
@@ -1232,6 +1260,7 @@ with tab6:
     with st.expander("📙 STL Forecaster", expanded=True):
 
         stl_sp = st.slider("Seasonal period (sp)", 2, 365, 12, key='stl_sp')
+        st.caption("Daily data → sp=365 | Weekly → sp=52 | Monthly → sp=12")
 
         if st.button("▶  Run STL", key='run_stl'):
             with st.spinner("Fitting STL…"):
